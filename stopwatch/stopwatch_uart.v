@@ -49,12 +49,20 @@ module top (
     input  wire CLK,     // 12 MHz system clock (pin 35)
     input  wire RX,      // UART receive from FTDI Port B TXD (pin 6)
     output wire TX,      // UART transmit to FTDI Port B RXD (pin 9)
-    output reg  LEDR_N   // Red LED (active-low) (pin 11)
+    output reg  LEDR_N,   // Red LED (active-low) (pin 11)
+    output wire P1A1,    // mirror of TX  (PMOD1A pin 4)
+    output wire P1A2,     // mirror of RX  (PMOD1A pin 2)
+	output wire P1A3,     // mirror of CLK  (PMOD1A pin 47)
+	output wire P1A4     // mirror of CLK  (PMOD1A pin 47)
+
+
 );
     // ===== UART parameters =====
     localparam integer CLK_HZ = 12_000_000;   // Board clock frequency in Hz
     localparam integer BAUD   = 115200;       // UART line rate (bits per second)
     localparam integer DIV    = CLK_HZ / BAUD; // CLK ticks per bit (~104 @12MHz)
+	localparam integer STRETCH = 24; // ~2.0 µs @ 12 MHz (24 cycles)
+
     // ===== 2-flip-flop synchronizer for RX (metastability protection) =====
     reg rx_d1 = 1'b1;              // First stage FF sampling asynchronous RX
     reg rx_d2 = 1'b1;              // Second stage FF to stabilize into CLK domain
@@ -62,17 +70,21 @@ module top (
         rx_d1 <= RX;                // Sample external RX into rx_d1
         rx_d2 <= rx_d1;             // Advance to rx_d2 (now safely in CLK domain)
     end
+
     // ===== UART RX state =====
     reg [15:0] rx_tick = 16'd0;     // Countdown to the next mid-bit sample point
     reg        rx_busy = 1'b0;      // 1 while receiving a frame (start→stop)
     reg [3:0]  rx_bitn = 4'd0;      // Bit index 0..9: start, d0..d7, stop
     reg [9:0]  rx_sh   = 10'h3FF;   // Shift reg (idle=all 1's) for sampled bits
     reg [7:0]  rx_byte;             // Captured data byte from the frame
+
     // LED default OFF (active-low ⇒ drive '1' to turn it off)
     initial LEDR_N = 1'b1;
+
     // ===== Hand-off strobes to TX =====
     reg        tx_load = 1'b0;      // One-clock pulse to request a TX of tx_data
     reg [7:0]  tx_data = 8'h00;     // Data byte to transmit when tx_load asserted
+
     // ===== UART RX finite-state behavior =====
     always @(posedge CLK) begin
         tx_load <= 1'b0;                      // Default: no transmit request now
@@ -135,5 +147,27 @@ module top (
             end
         end
     end
+	
+	// One-clock pulse on each TX bit boundary (and RX sample boundary)
+	wire tx_bit_tick = (tx_busy && tx_tick == 16'd0);
+	wire rx_bit_tick = (rx_busy && rx_tick == 16'd0);
+
+	reg [$clog2(STRETCH):0] rx_cnt = 0, tx_cnt = 0;
+
+	always @(posedge CLK) begin
+	  if (rx_bit_tick) rx_cnt <= STRETCH;
+	  else if (rx_cnt != 0)   rx_cnt <= rx_cnt - 1;
+
+	  if (tx_bit_tick) tx_cnt <= STRETCH;
+	  else if (tx_cnt != 0)   tx_cnt <= tx_cnt - 1;
+	end
+
+	// Mirror UART to PMOD pins
+	assign P1A1 = TX;     // mirror TX
+	assign P1A2 = RX;     // mirror raw RX
+	//assign P1A3 = CLK;     // mirror raw CLK
+	//assign P1A4 = (tick_stretch != 0);  // probe this pin: you'll see 10 pulses per frame
+	assign P1A3 = (rx_cnt != 0);  // stretched RX sampling instants
+	assign P1A4 = (tx_cnt != 0);  // stretched TX bit boundaries
 
 endmodule
